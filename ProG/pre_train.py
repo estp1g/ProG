@@ -9,6 +9,10 @@ import random
 from prompt import GNN
 from utils import gen_ran_output,load_data4pretrain,mkdir, graph_views
 
+from sklearn.linear_model import LogisticRegression
+from torch_geometric.datasets import Planetoid
+import argparse
+
 class GraphCL(torch.nn.Module):
 
     def __init__(self, gnn, hid_dim=16):
@@ -147,15 +151,44 @@ class PreTrain(torch.nn.Module):
 
             print("***epoch: {}/{} | train_loss: {:.8}".format(epoch, epochs, train_loss))
 
-            if train_loss_min > train_loss:
-                train_loss_min = train_loss
-                torch.save(self.model.gnn.state_dict(),
-                           "./pre_trained_gnn/{}.{}.{}.pth".format(dataname, self.pretext, self.gnn_type))
-                # do not use '../pre_trained_gnn/' because hope there should be two folders: (1) '../pre_trained_gnn/'  and (2) './pre_trained_gnn/'
-                # only selected pre-trained models will be moved into (1) so that we can keep reproduction
-                print("+++model saved ! {}.{}.{}.pth".format(dataname, self.pretext, self.gnn_type))
+            # if train_loss_min > train_loss:
+            #     train_loss_min = train_loss
+            #     torch.save(self.model.gnn.state_dict(),
+            #                "./pre_trained_gnn/{}.{}.{}.pth".format(dataname, self.pretext, self.gnn_type))
+            #     # do not use '../pre_trained_gnn/' because hope there should be two folders: (1) '../pre_trained_gnn/'  and (2) './pre_trained_gnn/'
+            #     # only selected pre-trained models will be moved into (1) so that we can keep reproduction
+            #     print("+++model saved ! {}.{}.{}.pth".format(dataname, self.pretext, self.gnn_type))
 
 
+def split_data(graph_data: Data, train_ratio=0.1, val_ration=0.3, test_ratio=0.6):
+    num_node = graph_data.x.size(0)
+
+    ind = torch.Tensor(random.choices([0, 1, 2], weights=[train_ratio, val_ration, test_ratio], k=num_node))
+    train_mask, val_mask, test_mask = (ind == 0), (ind == 1), (ind == 2)
+    split_graph_data = Data(x=graph_data.x, edge_index=graph_data.edge_index,
+                            y=graph_data.y, train_mask=train_mask, val_mask=val_mask, test_mask=test_mask)
+    return split_graph_data
+
+def pretrain_eval(graph_data: Data, gnn_enc_model: torch.nn.Module, device: torch.device):
+    if "train_mask" not in list(graph_data.keys()):
+        graph_data = split_data(graph_data)
+    graph_data = graph_data.to(device)
+
+    gnn_enc_model.eval()
+    with torch.no_grad():
+        all_node_emb = gnn_enc_model(graph_data.x, graph_data.edge_index)
+
+    train_z, val_z, test_z = all_node_emb[graph_data.train_mask], all_node_emb[graph_data.val_mask], \
+                             all_node_emb[graph_data.test_mask]
+
+    train_y, val_y, test_y = graph_data.y[graph_data.train_mask], graph_data.y[graph_data.val_mask], \
+                             graph_data.y[graph_data.test_mask]
+
+    clf = LogisticRegression(solver="lbfgs", multi_class="auto", max_iter=10000).\
+        fit(train_z.detach().cpu().numpy(), train_y.detach().cpu().numpy())
+    val_acc = clf.score(val_z.detach().cpu().numpy(), val_y.detach().cpu().numpy())
+    test_acc = clf.score(test_z.detach().cpu().numpy(), test_y.detach().cpu().numpy())
+    return val_acc, test_acc
 
 if __name__ == '__main__':
     print("PyTorch version:", torch.__version__)
@@ -175,14 +208,34 @@ if __name__ == '__main__':
     # do not use '../pre_trained_gnn/' because hope there should be two folders: (1) '../pre_trained_gnn/'  and (2) './pre_trained_gnn/'
     # only selected pre-trained models will be moved into (1) so that we can keep reproduction
 
-    # pretext = 'GraphCL' 
-    pretext = 'SimGRACE' 
-    gnn_type = 'TransformerConv'  
-    # gnn_type = 'GAT'
-    # gnn_type = 'GCN'
-    dataname, num_parts = 'CiteSeer', 200
-    graph_list, input_dim, hid_dim = load_data4pretrain(dataname, num_parts)
+    # # pretext = 'GraphCL' 
+    # pretext = 'SimGRACE' 
+    # gnn_type = 'TransformerConv'  
+    # # gnn_type = 'GAT'
+    # # gnn_type = 'GCN'
+    # dataname, num_parts = 'CiteSeer', 200
 
-    pt = PreTrain(pretext, gnn_type, input_dim, hid_dim, gln=2)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, default='CiteSeer')
+    parser.add_argument("--pretext", type=str, default='SimGRACE')
+    parser.add_argument("--gnn_type", type=str, default='GCN')
+    parser.add_argument("--num_parts", type=int, default=200)
+    parser.add_argument("--n_layers", type=int, default=2)
+    parser.add_argument("--pretrain_batch_size", type=int, default=10)
+    parser.add_argument("--pretrain_epoch", type=int, default=100)
+    parser.add_argument("--pretrain_lr", type=float, default=1e-3)
+    parser.add_argument("--pretrain_wd", type=float, default=1e-5)
+    args = parser.parse_args()
+    graph_list, input_dim, hid_dim = load_data4pretrain(args.dataname, args.num_parts)
+
+    
+
+    pt = PreTrain(args.pretext, args.gnn_type, input_dim, hid_dim, gln=args.n_layers)
     pt.model.to(device) 
-    pt.train(dataname, graph_list, batch_size=10, aug1='dropN', aug2="permE", aug_ratio=None,lr=0.01, decay=0.0001,epochs=100)
+    pt.train(args.dataname, graph_list, batch_size=args.pretrain_batch_size, aug1='dropN', aug2="permE", aug_ratio=None,lr=args.pretrain_lr, decay=args.pretrain_wd,epochs=args.pretrain_epoch)
+
+
+    graph_data = Planetoid(root='../raw_data/', name=args.dataset)
+    
+    val_acc, test_acc = pretrain_eval(graph_data, pt.gnn, device)
