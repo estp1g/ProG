@@ -227,15 +227,15 @@ if __name__ == '__main__':
     parser.add_argument("--pretrain_lr", type=float, default=1e-3)
     parser.add_argument("--pretrain_wd", type=float, default=1e-5)
     args = parser.parse_args()
-    graph_list, input_dim, hid_dim = load_data4pretrain(args.dataname, args.num_parts)
+    graph_list, input_dim, hid_dim = load_data4pretrain(args.dataset, args.num_parts)
 
     
 
     pt = PreTrain(args.pretext, args.gnn_type, input_dim, hid_dim, gln=args.n_layers)
     pt.model.to(device) 
-    pt.train(args.dataname, graph_list, batch_size=args.pretrain_batch_size, aug1='dropN', aug2="permE", aug_ratio=None,lr=args.pretrain_lr, decay=args.pretrain_wd,epochs=args.pretrain_epoch)
+    pt.train(args.dataset, graph_list, batch_size=args.pretrain_batch_size, aug1='dropN', aug2="permE", aug_ratio=None,lr=args.pretrain_lr, decay=args.pretrain_wd,epochs=args.pretrain_epoch)
 
 
-    graph_data = Planetoid(root='../raw_data/', name=args.dataset)
+    graph_data = Planetoid(root='../Dataset/raw_data/', name=args.dataset)[0]
     
     val_acc, test_acc = pretrain_eval(graph_data, pt.gnn, device)
